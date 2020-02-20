@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/flant/werf/pkg/path_matcher"
+	"gopkg.in/src-d/go-git.v4"
 	"io/ioutil"
 	"path"
 	"path/filepath"
@@ -929,14 +931,14 @@ func appendIfExist(stages []stage.Interface, stage stage.Interface) []stage.Inte
 }
 
 func prepareImageBasedOnImageFromDockerfile(imageFromDockerfileConfig *config.ImageFromDockerfile, c *Conveyor) (*Image, error) {
-	image := &Image{}
-	image.name = imageFromDockerfileConfig.Name
-	image.isDockerfileImage = true
+	i := &Image{}
+	i.name = imageFromDockerfileConfig.Name
+	i.isDockerfileImage = true
 
 	contextDir := filepath.Join(c.projectDir, imageFromDockerfileConfig.Context)
 
-	rel, err := filepath.Rel(c.projectDir, contextDir)
-	if err != nil || strings.HasPrefix(rel, "../") {
+	relContextDir, err := filepath.Rel(c.projectDir, contextDir)
+	if err != nil || strings.HasPrefix(relContextDir, "..") {
 		return nil, fmt.Errorf("unsupported context folder %s.\nOnly context folder specified inside project directory %s supported", contextDir, c.projectDir)
 	}
 
@@ -948,8 +950,8 @@ func prepareImageBasedOnImageFromDockerfile(imageFromDockerfileConfig *config.Im
 	}
 
 	dockerfilePath := filepath.Join(c.projectDir, imageFromDockerfileConfig.Dockerfile)
-	rel, err = filepath.Rel(c.projectDir, dockerfilePath)
-	if err != nil || strings.HasPrefix(rel, "../") {
+	relDockerfilePath, err := filepath.Rel(c.projectDir, dockerfilePath)
+	if err != nil || strings.HasPrefix(relDockerfilePath, "../") {
 		return nil, fmt.Errorf("unsupported dockerfile %s.\n Only dockerfile specified inside project directory %s supported", dockerfilePath, c.projectDir)
 	}
 
@@ -965,38 +967,19 @@ func prepareImageBasedOnImageFromDockerfile(imageFromDockerfileConfig *config.Im
 		return nil, err
 	}
 
-	var dockerignorePatternsWithContextPrefix []string
-	for _, dockerignorePattern := range dockerignorePatterns {
-		patterns := []string{dockerignorePattern}
-		specialPrefixes := []string{
-			"**/",
-			"/**/",
-			"!**/",
-			"!/**/",
-		}
-
-		for _, prefix := range specialPrefixes {
-			if strings.HasPrefix(dockerignorePattern, prefix) {
-				patterns = append(patterns, strings.Replace(dockerignorePattern, "**/", "", 1))
-				break
-			}
-		}
-
-		for _, pattern := range patterns {
-			var resultPattern string
-			if strings.HasPrefix(pattern, "!") {
-				resultPattern = "!" + path.Join(contextDir, pattern[1:])
-			} else {
-				resultPattern = path.Join(contextDir, pattern)
-			}
-
-			dockerignorePatternsWithContextPrefix = append(dockerignorePatternsWithContextPrefix, resultPattern)
-		}
-	}
-
-	dockerignorePatternMatcher, err := fileutils.NewPatternMatcher(dockerignorePatternsWithContextPrefix)
+	dockerignorePatternMatcher, err := fileutils.NewPatternMatcher(dockerignorePatterns)
 	if err != nil {
 		return nil, err
+	}
+
+	if relContextDir == "." {
+		relContextDir = ""
+	}
+	dockerignorePathMatcher := path_matcher.NewDockerfileIgnorePathMatcher(relContextDir, dockerignorePatternMatcher)
+
+	repository, err := git.PlainOpen(c.projectDir)
+	if err != nil {
+		logboek.Debug.LogLn(err)
 	}
 
 	data, err := ioutil.ReadFile(dockerfilePath)
@@ -1044,7 +1027,7 @@ func prepareImageBasedOnImageFromDockerfile(imageFromDockerfileConfig *config.Im
 		return nil, err
 	}
 
-	if err := handleImageFromName(resolvedBaseName, false, image, c); err != nil {
+	if err := handleImageFromName(resolvedBaseName, false, i, c); err != nil {
 		return nil, err
 	}
 
@@ -1054,22 +1037,23 @@ func prepareImageBasedOnImageFromDockerfile(imageFromDockerfileConfig *config.Im
 	}
 
 	dockerfileStage := stage.GenerateDockerfileStage(
-		dockerfilePath,
-		imageFromDockerfileConfig.Target,
-		contextDir,
-		dockerignorePatternMatcher,
-		imageFromDockerfileConfig.Args,
-		imageFromDockerfileConfig.AddHost,
-		dockerStages,
-		dockerArgsHash,
-		dockerTargetIndex,
-		baseStageOptions)
+		stage.NewDockerRunArgs(
+			dockerfilePath,
+			imageFromDockerfileConfig.Target,
+			contextDir,
+			imageFromDockerfileConfig.Args,
+			imageFromDockerfileConfig.AddHost,
+		),
+		stage.NewDockerCalculate(c.projectDir, dockerignorePathMatcher, repository),
+		stage.NewDockerOther(dockerStages, dockerArgsHash, dockerTargetIndex),
+		baseStageOptions,
+	)
 
-	image.stages = append(image.stages, dockerfileStage)
+	i.stages = append(i.stages, dockerfileStage)
 
 	logboek.Default.LogFDetails("Using stage %s\n", dockerfileStage.Name())
 
-	return image, nil
+	return i, nil
 }
 
 func resolveDockerStagesFromValue(stages []instructions.Stage) {

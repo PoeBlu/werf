@@ -132,24 +132,33 @@ func (f *GitMappingPathMatcher) TrimFileBasePath(filePath string) string {
 
 func matchGlobs(pathPart string, globs []string) (inProgressGlobs []string, matchedGlobs []string) {
 	for _, glob := range globs {
-		globParts := strings.Split(glob, string(os.PathSeparator))
-		isMatched, err := doublestar.PathMatch(globParts[0], pathPart)
-		if err != nil {
-			panic(err)
-		}
-
-		if !isMatched {
-			continue
-		} else if strings.Contains(globParts[0], "**") {
-			inProgressGlobs = append(inProgressGlobs, glob)
-		} else if len(globParts) > 1 {
-			inProgressGlobs = append(inProgressGlobs, filepath.Join(globParts[1:]...))
-		} else {
-			matchedGlobs = append(matchedGlobs, glob)
+		inProgressGlob, matchedGlob := matchGlob(pathPart, glob)
+		if inProgressGlob != "" {
+			inProgressGlobs = append(inProgressGlobs, inProgressGlob)
+		} else if matchedGlob != "" {
+			matchedGlobs = append(matchedGlobs, matchedGlob)
 		}
 	}
 
 	return
+}
+
+func matchGlob(pathPart string, glob string) (inProgressGlob, matchedGlob string) {
+	globParts := strings.Split(glob, string(os.PathSeparator))
+	isMatched, err := doublestar.PathMatch(globParts[0], pathPart)
+	if err != nil {
+		panic(err)
+	}
+
+	if !isMatched {
+		return "", ""
+	} else if strings.Contains(globParts[0], "**") {
+		return glob, ""
+	} else if len(globParts) > 1 {
+		return filepath.Join(globParts[1:]...), ""
+	} else {
+		return "", glob
+	}
 }
 
 func hasUniversalGlob(globs []string) bool {
